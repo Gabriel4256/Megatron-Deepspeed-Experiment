@@ -262,6 +262,7 @@ class ColumnParallelLinear(torch.nn.Module):
                 self.output_size_per_partition, 0, init_method,
                 stride=stride, return_master_weight=keep_master_weight_for_test)
         else:
+            # NOTE: 여기서 rank device에 따라 weight이 다르게 부여됨
             self.weight = Parameter(torch.empty(
                 self.output_size_per_partition, self.input_size,
                 device=torch.cuda.current_device(), dtype=args.params_dtype))
@@ -299,6 +300,7 @@ class ColumnParallelLinear(torch.nn.Module):
         output_parallel = F.linear(input_parallel, self.weight, bias)
         if self.gather_output and not self.is_expert_without_slicing:
             # All-gather across the partitions.
+            # unreachable
             output = gather_from_tensor_model_parallel_region(output_parallel)
         else:
             output = output_parallel 
@@ -402,12 +404,15 @@ class RowParallelLinear(torch.nn.Module):
             input_parallel = scatter_to_tensor_model_parallel_region(input_)
         # Matrix multiply.
         output_parallel = F.linear(input_parallel, self.weight)
+        
+        
         # All-reduce across all the partitions.
+        # NOTE: 여기서 parallel하게 계산되었던 값들이 합쳐짐
         if self.is_expert_without_slicing: # non-expert only tensor-parallelism
             output_ = output_parallel
         else:
             output_ = reduce_from_tensor_model_parallel_region(output_parallel)
-
+    
         if not self.skip_bias_add:
             output = output_ + self.bias if self.bias is not None else output_
             output_bias = None

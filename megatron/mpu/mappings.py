@@ -26,8 +26,16 @@ def _reduce(input_):
     if get_tensor_model_parallel_world_size()==1:
         return input_
 
-    # All-reduce.
+    start = torch.cuda.Event(enable_timing=True)
+    end = torch.cuda.Event(enable_timing=True)
+
+    # All-reduce
+    start.record()
     torch.distributed.all_reduce(input_, group=get_tensor_model_parallel_group())
+    end.record()
+    end.synchronize()
+    
+    print(f'[RANK {get_tensor_model_parallel_rank()}] all_reduce latency: {start.elapsed_time(end)}, size: {input_.size()} type: {input_.dtype}')
 
     return input_
 

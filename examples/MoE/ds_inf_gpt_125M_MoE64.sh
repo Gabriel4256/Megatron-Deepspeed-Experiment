@@ -14,7 +14,7 @@ MODEL_SIZE=0.125
 NUM_LAYERS=12
 HIDDEN_SIZE=768
 NUM_ATTN_HEADS=12
-GLOBAL_BATCH_SIZE=256
+GLOBAL_BATCH_SIZE=$1
 # LR=6.0e-4
 # MIN_LR=6.0e-5
 
@@ -117,17 +117,17 @@ LR_DECAY_TOKENS=300000000000
 ### Parallelism configs
 ## Micro batch size per GPU
 ## Make sure that BATCH_SIZE <= GLOBAL_BATCH_SIZE*PP_SIZE*MP_SIZE/NUM_GPUS
-BATCH_SIZE=4
+BATCH_SIZE=$1
 
 ## Model parallelism, 1 is no MP
 ## Currently MoE models have divergence issue when MP > 1.
-MP_SIZE=1
+MP_SIZE=2
 
 ## Pipeline parallelism
 ## Currently we don't support PP for MoE. To disable PP, set PP_SIZE
 ## to 1 and use the "--no-pipeline-parallel" arg.
-PP_SIZE=2
-NUM_GPUS=2
+PP_SIZE=1
+NUM_GPUS=1
 ###############################################################################
 ### MoE configs
 ## Number of experts. EP_SIZE 1 means dense model without MoE
@@ -352,12 +352,17 @@ deepspeed_options="${deepspeed_options} \
         --no-pipeline-parallel"
 fi
 
+# if [[ $PP_SIZE -eq 1 ]]; then
+# deepspeed_options="${deepspeed_options} \
+#         --no-pipeline-parallel"
+# fi
+
 if [ "${ACTIVATION_CHECKPOINT}" = "true" ]; then
 deepspeed_options="${deepspeed_options} \
         --deepspeed-activation-checkpointing"
 fi
 
-run_cmd="deepspeed ${DIR}/../../pretrain_gpt.py ${megatron_options} ${data_options} ${deepspeed_options}"
+run_cmd="deepspeed ${DIR}/../../inf_gpt.py ${megatron_options} ${data_options} ${deepspeed_options}"
 # &> ${OUTPUT_BASEPATH}/log/${NAME}_${host}_${current_time}.log"
 echo ${run_cmd}
 eval ${run_cmd}

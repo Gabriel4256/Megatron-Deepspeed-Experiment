@@ -1,5 +1,5 @@
 #!/bin/bash
-export TORCH_CUDA_ARCH_LIST=8.6+PTX
+export TORCH_CUDA_ARCH_LIST=11.6+PTX
 CHECKPOINT_PATH=checkpoints/gpt2_345m
 VOCAB_FILE=gpt2-vocab.json
 MERGE_FILE=gpt2-merges.txt
@@ -19,7 +19,7 @@ ds_inference="--ds-inference"
 
 launch_cmd="deepspeed --num_nodes $nodes --num_gpus $gpus"
 L=24
-H=2048
+H=1024
 A=16
 #experts1=${experts[$k]}
 program_cmd="tools/generate_samples_gpt.py \

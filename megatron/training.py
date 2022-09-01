@@ -15,6 +15,37 @@
 
 """Pretrain utilities."""
 
+from distutils import dist
+from deepspeed.compression.compress import init_compression, redundancy_clean
+import deepspeed
+from megatron.utils import report_memory, throughput_calculator, checkpoint_throughput_calculator
+from megatron.schedules import forward_backward_pipelining_with_interleaving
+from megatron.schedules import forward_backward_pipelining_without_interleaving
+from megatron.schedules import forward_backward_no_pipelining
+from megatron.utils import calc_params_l2_norm
+from megatron.data.data_samplers import build_pretraining_data_loader
+from megatron.utils import unwrap_model
+from megatron.utils import check_adlr_autoresume_termination
+from megatron.model import DistributedDataParallel as LocalDDP
+from megatron.learning_rates import AnnealingLR
+from megatron.initialize import write_args_to_tensorboard
+from megatron.initialize import initialize_megatron
+from megatron.optimizer import get_megatron_optimizer
+from megatron.model import Float16Module
+from megatron.checkpointing import save_checkpoint
+from megatron.checkpointing import load_checkpoint
+from megatron import print_rank_last
+from megatron import print_rank_0
+from megatron import mpu
+from megatron import update_num_microbatches
+from megatron import is_last_rank
+from megatron import get_num_microbatches
+from megatron import get_current_global_batch_size
+from megatron import get_tensorboard_writer
+from megatron import get_timers
+from megatron import get_args
+from torch.nn.parallel.distributed import DistributedDataParallel as torchDDP
+import torch
 from datetime import datetime
 import math
 import sys
@@ -22,40 +53,6 @@ import time
 import json
 # The earliest we can measure the start time.
 _TRAIN_START_TIME = time.time()
-
-import torch
-from torch.nn.parallel.distributed import DistributedDataParallel as torchDDP
-
-from megatron import get_args
-from megatron import get_timers
-from megatron import get_tensorboard_writer
-from megatron import get_current_global_batch_size
-from megatron import get_num_microbatches
-from megatron import is_last_rank
-from megatron import update_num_microbatches
-from megatron import mpu
-from megatron import print_rank_0
-from megatron import print_rank_last
-from megatron.checkpointing import load_checkpoint
-from megatron.checkpointing import save_checkpoint
-from megatron.model import Float16Module
-from megatron.optimizer import get_megatron_optimizer
-from megatron.initialize import initialize_megatron
-from megatron.initialize import write_args_to_tensorboard
-from megatron.learning_rates import AnnealingLR
-from megatron.model import DistributedDataParallel as LocalDDP
-from megatron.utils import check_adlr_autoresume_termination
-from megatron.utils import unwrap_model
-from megatron.data.data_samplers import build_pretraining_data_loader
-from megatron.utils import calc_params_l2_norm
-from megatron.schedules import forward_backward_no_pipelining
-from megatron.schedules import forward_backward_pipelining_without_interleaving
-from megatron.schedules import forward_backward_pipelining_with_interleaving
-from megatron.utils import report_memory, throughput_calculator, checkpoint_throughput_calculator
-
-import deepspeed
-from deepspeed.compression.compress import init_compression, redundancy_clean
-
 
 
 def print_datetime(string):
@@ -117,20 +114,21 @@ def pretrain(train_valid_test_dataset_provider,
         args.deepspeed_configuration = json.load(
             open(args.deepspeed_config, 'r', encoding='utf-8'))
         if "curriculum_learning" in args.deepspeed_configuration and \
-            "enabled" in args.deepspeed_configuration["curriculum_learning"]:
-            args.curriculum_learning = args.deepspeed_configuration[ \
+                "enabled" in args.deepspeed_configuration["curriculum_learning"]:
+            args.curriculum_learning = args.deepspeed_configuration[
                 "curriculum_learning"]["enabled"]
         if args.curriculum_learning and not args.no_pipeline_parallel:
             from deepspeed.runtime.data_pipeline.curriculum_scheduler \
                 import CurriculumScheduler
-            args.curriculum_scheduler = CurriculumScheduler( \
+            args.curriculum_scheduler = CurriculumScheduler(
                 args.deepspeed_configuration["curriculum_learning"])
         if "compression_training" in args.deepspeed_configuration:
             args.compression_training = True
 
     # Model, optimizer, and learning rate.
     timers('model-and-optimizer-setup').start()
-    model, optimizer, lr_scheduler = setup_model_and_optimizer(model_provider, teacher=False)
+    model, optimizer, lr_scheduler = setup_model_and_optimizer(
+        model_provider, teacher=False)
     timers('model-and-optimizer-setup').stop()
     print_datetime('after model, optimizer, and learning rate '
                    'scheduler are built')
@@ -139,12 +137,16 @@ def pretrain(train_valid_test_dataset_provider,
     timers('train/valid/test-data-iterators-setup').start()
     if args.virtual_pipeline_model_parallel_size is not None:
         all_data_iterators = [
-            build_train_valid_test_data_iterators(train_valid_test_dataset_provider)
+            build_train_valid_test_data_iterators(
+                train_valid_test_dataset_provider)
             for _ in range(len(model))
         ]
-        train_data_iterator = [data_iterators[0] for data_iterators in all_data_iterators]
-        valid_data_iterator = [data_iterators[1] for data_iterators in all_data_iterators]
-        test_data_iterator = [data_iterators[2] for data_iterators in all_data_iterators]
+        train_data_iterator = [data_iterators[0]
+                               for data_iterators in all_data_iterators]
+        valid_data_iterator = [data_iterators[1]
+                               for data_iterators in all_data_iterators]
+        test_data_iterator = [data_iterators[2]
+                              for data_iterators in all_data_iterators]
     else:
         train_data_iterator, valid_data_iterator, test_data_iterator \
             = build_train_valid_test_data_iterators(
@@ -153,19 +155,20 @@ def pretrain(train_valid_test_dataset_provider,
     print_datetime('after dataloaders are built')
 
     teacher_model = None
-    if args.mos or args.kd: # Set up teacher model
+    if args.mos or args.kd:  # Set up teacher model
         teacher_model = setup_teacher_model(args, model_provider)
 
     # Print setup timing.
     print_rank_0('done with setup ...')
-    timers.log(['model-and-optimizer-setup', 'train/valid/test-data-iterators-setup'])
+    timers.log(['model-and-optimizer-setup',
+               'train/valid/test-data-iterators-setup'])
     print_rank_0('training ...')
 
     iteration = 0
     if args.do_train and args.train_iters > 0:
         iteration = train(forward_step_func,
                           model, optimizer, lr_scheduler,
-                          train_data_iterator, valid_data_iterator, 
+                          train_data_iterator, valid_data_iterator,
                           teacher_model=teacher_model)
     print_datetime('after training is done')
 
@@ -174,16 +177,15 @@ def pretrain(train_valid_test_dataset_provider,
         evaluate_and_print_results(prefix, forward_step_func,
                                    valid_data_iterator, model,
                                    iteration, False)
-    
+
     # Clean the model and do evaluation again
     if args.compression_training:
         model = [redundancy_clean(model[0], args.deepspeed_config, mpu)]
         if args.do_valid:
             prefix = 'the end of training and after model cleaning for val data'
             evaluate_and_print_results(prefix, forward_step_func,
-                                    valid_data_iterator, model,
-                                    iteration, False)
-
+                                       valid_data_iterator, model,
+                                       iteration, False)
 
     if args.save and iteration != 0:
         save_checkpoint(iteration, model, optimizer, lr_scheduler)
@@ -194,6 +196,7 @@ def pretrain(train_valid_test_dataset_provider,
         evaluate_and_print_results(prefix, forward_step_func,
                                    test_data_iterator, model,
                                    0, True)
+
 
 def update_train_iters(args):
 
@@ -219,15 +222,16 @@ def update_train_iters(args):
         # Constant phase
         # Note that we throw away any partial last batch.
         iterations += (args.train_samples - consumed_samples) // \
-                      args.global_batch_size
+            args.global_batch_size
         args.train_iters = iterations
 
     print_rank_0('setting training iterations to {}'.format(args.train_iters))
 
 
-def setup_teacher_model(args, model_provider):        
-    
-    print_rank_0('***>>>>> Student model checkpoint iteration:{}'.format(args.iteration))
+def setup_teacher_model(args, model_provider):
+
+    print_rank_0(
+        '***>>>>> Student model checkpoint iteration:{}'.format(args.iteration))
     iteration_stuent = args.iteration
     num_layers_student = args.num_layers
     num_experts_student = args.num_experts
@@ -253,6 +257,7 @@ def setup_teacher_model(args, model_provider):
     args.iteration = iteration_stuent
 
     return teacher_model
+
 
 def get_model(model_provider_func):
     """Build the model."""
@@ -280,7 +285,6 @@ def get_model(model_provider_func):
             post_process=post_process
         )
 
-
     if not isinstance(model, list):
         model = [model]
 
@@ -296,10 +300,10 @@ def get_model(model_provider_func):
     if mpu.get_data_parallel_rank() == 0:
         print(' > number of parameters on (tensor, pipeline) '
               'model parallel rank ({}, {}): {}'.format(
-            mpu.get_tensor_model_parallel_rank(),
-            mpu.get_pipeline_model_parallel_rank(),
-            sum([sum([p.ds_numel if hasattr(p,'ds_id') else p.nelement() for p in model_module.parameters()])
-                 for model_module in model])), flush=True)
+                  mpu.get_tensor_model_parallel_rank(),
+                  mpu.get_pipeline_model_parallel_rank(),
+                  sum([sum([p.ds_numel if hasattr(p, 'ds_id') else p.nelement() for p in model_module.parameters()])
+                       for model_module in model])), flush=True)
 
     if args.deepspeed:
         return model
@@ -372,6 +376,7 @@ def get_learning_rate_scheduler(optimizer):
 
     return lr_scheduler
 
+
 def load_model_weights_only(model_provider_func):
     """Setup model and optimizer."""
     args = get_args()
@@ -402,11 +407,13 @@ def load_model_weights_only(model_provider_func):
 
     print_datetime('before load checkpoint')
     if args.load is not None:
-        iteration = load_checkpoint(model, optimizer, lr_scheduler, strict=True, load_only_weights=True)
+        iteration = load_checkpoint(
+            model, optimizer, lr_scheduler, strict=True, load_only_weights=True)
 
     print_datetime('after load checkpoint weights')
 
     return model, optimizer, lr_scheduler
+
 
 def setup_model_and_optimizer(model_provider_func, teacher=False):
     """Setup model and optimizer."""
@@ -418,18 +425,18 @@ def setup_model_and_optimizer(model_provider_func, teacher=False):
     student_global_steps = 0
     if args.kd or args.mos:
         model, _, _, _ = deepspeed.initialize(
-                model=model[0],
-                args=args,
-                mpu=mpu if args.no_pipeline_parallel else None
-            )
+            model=model[0],
+            args=args,
+            mpu=mpu if args.no_pipeline_parallel else None
+        )
         model = [model]
         if args.load is not None:
             args.iteration = load_checkpoint(model, None, None, strict=False)
         else:
             args.iteration = 0
         student_global_steps = model[0].global_steps
-        print_rank_0('***>>>>> Student model, global step:{}'.format(student_global_steps))
-
+        print_rank_0(
+            '***>>>>> Student model, global step:{}'.format(student_global_steps))
 
     if args.compression_training:
         model, _, _, _ = deepspeed.initialize(
@@ -439,7 +446,6 @@ def setup_model_and_optimizer(model_provider_func, teacher=False):
         )
         model = [model]
         model = [init_compression(model[0].module, args.deepspeed_config, mpu)]
-    
 
     unwrapped_model = unwrap_model(model,
                                    (torchDDP, LocalDDP, Float16Module))
@@ -449,11 +455,10 @@ def setup_model_and_optimizer(model_provider_func, teacher=False):
         lr_scheduler = None
     else:
         if teacher:
-          optimizer = None
+            optimizer = None
         else:
-          optimizer = get_megatron_optimizer(unwrapped_model)
+            optimizer = get_megatron_optimizer(unwrapped_model)
         lr_scheduler = get_learning_rate_scheduler(optimizer)
-
 
     if args.deepspeed:
         print_rank_0("DeepSpeed is enabled.")
@@ -498,7 +503,7 @@ def setup_model_and_optimizer(model_provider_func, teacher=False):
 
     # get model without FP16 and/or TorchDDP wrappers
     if args.iteration == 0 and len(unwrapped_model) == 1 \
-        and hasattr(unwrapped_model[0], 'init_state_dict_from_bert'):
+            and hasattr(unwrapped_model[0], 'init_state_dict_from_bert'):
         print_rank_0("Initializing ICT from pretrained BERT model")
         unwrapped_model[0].init_state_dict_from_bert()
         if args.fp16:
@@ -519,7 +524,7 @@ def train_step(forward_step_func, data_iterator,
         assert isinstance(model[0], deepspeed.PipelineEngine)
         loss = model[0].train_batch(data_iter=data_iterator)
         grad_norm = model[0].get_global_grad_norm()
-        return {'lm loss' : loss}, skipped_iter, grad_norm, num_zeros_in_grad
+        return {'lm loss': loss}, skipped_iter, grad_norm, num_zeros_in_grad
 
     # Set grad to zero.
     if not args.deepspeed:
@@ -572,15 +577,16 @@ def train_step(forward_step_func, data_iterator,
                     grad = word_embeddings_weight.main_grad
                 else:
                     grad = word_embeddings_weight.grad
-                torch.distributed.all_reduce(grad, group=mpu.get_embedding_group())
+                torch.distributed.all_reduce(
+                    grad, group=mpu.get_embedding_group())
     timers('backward-embedding-all-reduce').stop()
 
     # Update parameters.
     timers('optimizer').start()
     if args.deepspeed:
         increment = get_num_microbatches() * \
-                    args.micro_batch_size * \
-                    args.data_parallel_size
+            args.micro_batch_size * \
+            args.data_parallel_size
         model[0].step(lr_kwargs={'increment': increment})
         update_successful = model[0].was_step_applied()
     else:
@@ -592,17 +598,18 @@ def train_step(forward_step_func, data_iterator,
         skipped_iter = 0
         grad_norm = None
         num_zeros_in_grad = None
-        
+
         loss_reduced = {}
         for key in losses_reduced[0]:
             losses_reduced_for_key = [x[key] for x in losses_reduced]
-            loss_reduced[key] = sum(losses_reduced_for_key) / len(losses_reduced_for_key)
+            loss_reduced[key] = sum(
+                losses_reduced_for_key) / len(losses_reduced_for_key)
         return loss_reduced, skipped_iter, grad_norm, num_zeros_in_grad
     else:
         if update_successful:
             increment = get_num_microbatches() * \
-                        args.micro_batch_size * \
-                        args.data_parallel_size
+                args.micro_batch_size * \
+                args.data_parallel_size
             lr_scheduler.step(increment=increment)
             skipped_iter = 0
         else:
@@ -613,7 +620,8 @@ def train_step(forward_step_func, data_iterator,
             loss_reduced = {}
             for key in losses_reduced[0]:
                 losses_reduced_for_key = [x[key] for x in losses_reduced]
-                loss_reduced[key] = sum(losses_reduced_for_key) / len(losses_reduced_for_key)
+                loss_reduced[key] = sum(
+                    losses_reduced_for_key) / len(losses_reduced_for_key)
             return loss_reduced, skipped_iter, grad_norm, num_zeros_in_grad
     return {}, skipped_iter, grad_norm, num_zeros_in_grad
 
@@ -650,8 +658,8 @@ def training_log(loss_dict, total_loss_dict, learning_rate, iteration,
         else:
             value = loss_dict[key].float().sum().item()
             is_nan = value == float('inf') or \
-                     value == -float('inf') or \
-                     value != value
+                value == -float('inf') or \
+                value != value
             got_nan = got_nan or is_nan
     total_loss_dict[nan_iters_key] = total_loss_dict.get(
         nan_iters_key, 0) + int(got_nan)
@@ -685,17 +693,22 @@ def training_log(loss_dict, total_loss_dict, learning_rate, iteration,
     batch_size = args.micro_batch_size * args.data_parallel_size * \
         get_num_microbatches()
     total_iterations = total_loss_dict[advanced_iters_key] + \
-                       total_loss_dict[skipped_iters_key]
+        total_loss_dict[skipped_iters_key]
 
     # Tensorboard values.
     if writer and (iteration % args.tensorboard_log_interval == 0) and \
        is_last_rank():
-        writer.add_scalar('steps-vs-samples/y=steps,x=samples', iteration, args.consumed_train_samples)
-        writer.add_scalar('steps-vs-samples/y=samples,x=steps', args.consumed_train_samples, iteration)
-        writer.add_scalar('steps-vs-tokens/y=steps,x=tokens', iteration, args.consumed_train_tokens)
-        writer.add_scalar('steps-vs-tokens/y=tokens,x=steps', args.consumed_train_tokens, iteration)
+        writer.add_scalar('steps-vs-samples/y=steps,x=samples',
+                          iteration, args.consumed_train_samples)
+        writer.add_scalar('steps-vs-samples/y=samples,x=steps',
+                          args.consumed_train_samples, iteration)
+        writer.add_scalar('steps-vs-tokens/y=steps,x=tokens',
+                          iteration, args.consumed_train_tokens)
+        writer.add_scalar('steps-vs-tokens/y=tokens,x=steps',
+                          args.consumed_train_tokens, iteration)
         if args.log_learning_rate_to_tensorboard:
-            writer.add_scalar('learning-rate/learning-rate', learning_rate, iteration)
+            writer.add_scalar('learning-rate/learning-rate',
+                              learning_rate, iteration)
             writer.add_scalar('learning-rate/learning-rate vs samples', learning_rate,
                               args.consumed_train_samples)
             writer.add_scalar('learning-rate/learning-rate vs tokens', learning_rate,
@@ -705,7 +718,8 @@ def training_log(loss_dict, total_loss_dict, learning_rate, iteration,
             writer.add_scalar('batch-size/batch-size vs samples', batch_size,
                               args.consumed_train_samples)
         for key in loss_dict:
-            writer.add_scalar(f"lm-loss-training/{key}", loss_dict[key], iteration)
+            writer.add_scalar(
+                f"lm-loss-training/{key}", loss_dict[key], iteration)
             writer.add_scalar(f"lm-loss-training/{key}" + ' vs samples', loss_dict[key],
                               args.consumed_train_samples)
             writer.add_scalar(f"lm-loss-training/{key}" + ' vs tokens', loss_dict[key],
@@ -723,13 +737,15 @@ def training_log(loss_dict, total_loss_dict, learning_rate, iteration,
             writer.add_scalar('grad-norm/grad-norm vs tokens', grad_norm,
                               args.consumed_train_tokens)
         if num_zeros_in_grad is not None:
-            writer.add_scalar('num-zeros/num-zeros', num_zeros_in_grad, iteration)
+            writer.add_scalar('num-zeros/num-zeros',
+                              num_zeros_in_grad, iteration)
             writer.add_scalar('num-zeros/num-zeros vs samples', num_zeros_in_grad,
                               args.consumed_train_samples)
             writer.add_scalar('num-zeros/num-zeros vs tokens', num_zeros_in_grad,
                               args.consumed_train_tokens)
         if params_norm is not None:
-            writer.add_scalar('params-norm/params-norm', params_norm, iteration)
+            writer.add_scalar('params-norm/params-norm',
+                              params_norm, iteration)
             writer.add_scalar('params-norm/params-norm vs samples', params_norm,
                               args.consumed_train_samples)
             writer.add_scalar('params-norm/params-norm vs tokens', params_norm,
@@ -749,68 +765,105 @@ def training_log(loss_dict, total_loss_dict, learning_rate, iteration,
             opt_stats_2 = [0.0] * 4
             for _, group in enumerate(optimizer.param_groups):
                 for _, param in enumerate(group['params']):
-                    opt_stats[0] += (torch.norm(optimizer.state[param]['exp_avg_sq']).item())**2
-                    opt_stats[1] += (torch.norm(optimizer.state[param]['exp_avg_sq'].sqrt()).item())**2
-                    opt_stats[2] += (torch.norm(optimizer.state[param]['exp_avg']).item())**2
+                    opt_stats[0] += (torch.norm(optimizer.state[param]
+                                     ['exp_avg_sq']).item())**2
+                    opt_stats[1] += (torch.norm(optimizer.state[param]
+                                     ['exp_avg_sq'].sqrt()).item())**2
+                    opt_stats[2] += (torch.norm(optimizer.state[param]
+                                     ['exp_avg']).item())**2
                     opt_stats[3] += (torch.norm(param).item())**2
-                    opt_stats[4] += torch.norm(optimizer.state[param]['exp_avg_sq'],p=1).item()
-                    opt_stats[5] += torch.norm(optimizer.state[param]['exp_avg_sq'].sqrt(),p=1).item()
-                    opt_stats[6] += torch.norm(optimizer.state[param]['exp_avg'],p=1).item()
-                    opt_stats[7] += torch.norm(param,p=1).item()
-                    opt_stats_2[0] = max(opt_stats_2[0], abs(optimizer.state[param]['exp_avg_sq'].max().item()), abs(optimizer.state[param]['exp_avg_sq'].min().item()))
-                    opt_stats_2[1] = max(opt_stats_2[1], optimizer.state[param]['exp_avg_sq'].sqrt().abs_().max().item())
-                    opt_stats_2[2] = max(opt_stats_2[2], abs(optimizer.state[param]['exp_avg'].max().item()), abs(optimizer.state[param]['exp_avg'].min().item()))
-                    opt_stats_2[3] = max(opt_stats_2[3], abs(param.max().item()), abs(param.min().item()))
+                    opt_stats[4] += torch.norm(optimizer.state[param]
+                                               ['exp_avg_sq'], p=1).item()
+                    opt_stats[5] += torch.norm(optimizer.state[param]
+                                               ['exp_avg_sq'].sqrt(), p=1).item()
+                    opt_stats[6] += torch.norm(optimizer.state[param]
+                                               ['exp_avg'], p=1).item()
+                    opt_stats[7] += torch.norm(param, p=1).item()
+                    opt_stats_2[0] = max(opt_stats_2[0], abs(optimizer.state[param]['exp_avg_sq'].max(
+                    ).item()), abs(optimizer.state[param]['exp_avg_sq'].min().item()))
+                    opt_stats_2[1] = max(
+                        opt_stats_2[1], optimizer.state[param]['exp_avg_sq'].sqrt().abs_().max().item())
+                    opt_stats_2[2] = max(opt_stats_2[2], abs(optimizer.state[param]['exp_avg'].max(
+                    ).item()), abs(optimizer.state[param]['exp_avg'].min().item()))
+                    opt_stats_2[3] = max(opt_stats_2[3], abs(
+                        param.max().item()), abs(param.min().item()))
             # print('step {} rank {} before sync opt_stats {}, {}'.format(iteration, torch.distributed.get_rank(), opt_stats_2, opt_stats))
             if args.zero_stage > 0:
                 # ZeRO partiions optimizer states
                 opt_stats = torch.cuda.FloatTensor(opt_stats)
-                torch.distributed.all_reduce(opt_stats, group=mpu.get_data_parallel_group())
+                torch.distributed.all_reduce(
+                    opt_stats, group=mpu.get_data_parallel_group())
                 opt_stats_2 = torch.cuda.FloatTensor(opt_stats_2)
                 torch.distributed.all_reduce(opt_stats_2, op=torch.distributed.ReduceOp.MAX,
-                    group=mpu.get_data_parallel_group())
+                                             group=mpu.get_data_parallel_group())
 
             if args.tensor_model_parallel_size > 1:
                 opt_stats = torch.cuda.FloatTensor(opt_stats)
-                torch.distributed.all_reduce(opt_stats, group=mpu.get_tensor_model_parallel_group())
+                torch.distributed.all_reduce(
+                    opt_stats, group=mpu.get_tensor_model_parallel_group())
                 opt_stats_2 = torch.cuda.FloatTensor(opt_stats_2)
                 torch.distributed.all_reduce(opt_stats_2, op=torch.distributed.ReduceOp.MAX,
-                    group=mpu.get_tensor_model_parallel_group())
+                                             group=mpu.get_tensor_model_parallel_group())
 
             if args.pipeline_model_parallel_size > 1:
                 opt_stats = torch.cuda.FloatTensor(opt_stats)
-                torch.distributed.all_reduce(opt_stats, group=mpu.get_pipeline_model_parallel_group())
+                torch.distributed.all_reduce(
+                    opt_stats, group=mpu.get_pipeline_model_parallel_group())
                 opt_stats_2 = torch.cuda.FloatTensor(opt_stats_2)
                 torch.distributed.all_reduce(opt_stats_2, op=torch.distributed.ReduceOp.MAX,
-                    group=mpu.get_pipeline_model_parallel_group())
+                                             group=mpu.get_pipeline_model_parallel_group())
 
             # print('step {} rank {} after sync opt_stats {}, {}'.format(iteration, torch.distributed.get_rank(), opt_stats_2, opt_stats))
             if writer and is_last_rank():
-                writer.add_scalar('optimizer/variance_l2 vs tokens', opt_stats[0]**0.5, args.consumed_train_tokens)
-                writer.add_scalar('optimizer/variance_sqrt_l2 vs tokens', opt_stats[1]**0.5, args.consumed_train_tokens)
-                writer.add_scalar('optimizer/momentum_l2 vs tokens', opt_stats[2]**0.5, args.consumed_train_tokens)
-                writer.add_scalar('optimizer/weight_l2 vs tokens', opt_stats[3]**0.5, args.consumed_train_tokens)
-                writer.add_scalar('optimizer/variance_l1 vs tokens', opt_stats[4], args.consumed_train_tokens)
-                writer.add_scalar('optimizer/variance_sqrt_l1 vs tokens', opt_stats[5], args.consumed_train_tokens)
-                writer.add_scalar('optimizer/momentum_l1 vs tokens', opt_stats[6], args.consumed_train_tokens)
-                writer.add_scalar('optimizer/weight_l1 vs tokens', opt_stats[7], args.consumed_train_tokens)
-                writer.add_scalar('optimizer/variance_abs_max vs tokens', opt_stats_2[0], args.consumed_train_tokens)
-                writer.add_scalar('optimizer/variance_sqrt_abs_max vs tokens', opt_stats_2[1], args.consumed_train_tokens)
-                writer.add_scalar('optimizer/momentum_abs_max vs tokens', opt_stats_2[2], args.consumed_train_tokens)
-                writer.add_scalar('optimizer/weight_abs_max vs tokens', opt_stats_2[3], args.consumed_train_tokens)
+                writer.add_scalar('optimizer/variance_l2 vs tokens',
+                                  opt_stats[0]**0.5, args.consumed_train_tokens)
+                writer.add_scalar('optimizer/variance_sqrt_l2 vs tokens',
+                                  opt_stats[1]**0.5, args.consumed_train_tokens)
+                writer.add_scalar('optimizer/momentum_l2 vs tokens',
+                                  opt_stats[2]**0.5, args.consumed_train_tokens)
+                writer.add_scalar('optimizer/weight_l2 vs tokens',
+                                  opt_stats[3]**0.5, args.consumed_train_tokens)
+                writer.add_scalar('optimizer/variance_l1 vs tokens',
+                                  opt_stats[4], args.consumed_train_tokens)
+                writer.add_scalar('optimizer/variance_sqrt_l1 vs tokens',
+                                  opt_stats[5], args.consumed_train_tokens)
+                writer.add_scalar('optimizer/momentum_l1 vs tokens',
+                                  opt_stats[6], args.consumed_train_tokens)
+                writer.add_scalar('optimizer/weight_l1 vs tokens',
+                                  opt_stats[7], args.consumed_train_tokens)
+                writer.add_scalar('optimizer/variance_abs_max vs tokens',
+                                  opt_stats_2[0], args.consumed_train_tokens)
+                writer.add_scalar('optimizer/variance_sqrt_abs_max vs tokens',
+                                  opt_stats_2[1], args.consumed_train_tokens)
+                writer.add_scalar('optimizer/momentum_abs_max vs tokens',
+                                  opt_stats_2[2], args.consumed_train_tokens)
+                writer.add_scalar('optimizer/weight_abs_max vs tokens',
+                                  opt_stats_2[3], args.consumed_train_tokens)
 
-                writer.add_scalar('optimizer/variance_l2', opt_stats[0]**0.5, iteration)
-                writer.add_scalar('optimizer/variance_sqrt_l2', opt_stats[1]**0.5, iteration)
-                writer.add_scalar('optimizer/momentum_l2', opt_stats[2]**0.5, iteration)
-                writer.add_scalar('optimizer/weight_l2', opt_stats[3]**0.5, iteration)
-                writer.add_scalar('optimizer/variance_l1', opt_stats[4], iteration)
-                writer.add_scalar('optimizer/variance_sqrt_l1', opt_stats[5], iteration)
-                writer.add_scalar('optimizer/momentum_l1', opt_stats[6], iteration)
-                writer.add_scalar('optimizer/weight_l1', opt_stats[7], iteration)
-                writer.add_scalar('optimizer/variance_abs_max', opt_stats_2[0], iteration)
-                writer.add_scalar('optimizer/variance_sqrt_abs_max', opt_stats_2[1], iteration)
-                writer.add_scalar('optimizer/momentum_abs_max', opt_stats_2[2], iteration)
-                writer.add_scalar('optimizer/weight_abs_max', opt_stats_2[3], iteration)
+                writer.add_scalar('optimizer/variance_l2',
+                                  opt_stats[0]**0.5, iteration)
+                writer.add_scalar('optimizer/variance_sqrt_l2',
+                                  opt_stats[1]**0.5, iteration)
+                writer.add_scalar('optimizer/momentum_l2',
+                                  opt_stats[2]**0.5, iteration)
+                writer.add_scalar('optimizer/weight_l2',
+                                  opt_stats[3]**0.5, iteration)
+                writer.add_scalar('optimizer/variance_l1',
+                                  opt_stats[4], iteration)
+                writer.add_scalar('optimizer/variance_sqrt_l1',
+                                  opt_stats[5], iteration)
+                writer.add_scalar('optimizer/momentum_l1',
+                                  opt_stats[6], iteration)
+                writer.add_scalar('optimizer/weight_l1',
+                                  opt_stats[7], iteration)
+                writer.add_scalar('optimizer/variance_abs_max',
+                                  opt_stats_2[0], iteration)
+                writer.add_scalar(
+                    'optimizer/variance_sqrt_abs_max', opt_stats_2[1], iteration)
+                writer.add_scalar('optimizer/momentum_abs_max',
+                                  opt_stats_2[2], iteration)
+                writer.add_scalar('optimizer/weight_abs_max',
+                                  opt_stats_2[3], iteration)
 
     if iteration % args.log_interval == 0:
         elapsed_time = timers('interval-time').elapsed()
@@ -820,7 +873,8 @@ def training_log(loss_dict, total_loss_dict, learning_rate, iteration,
         num_layers = args.num_layers
         vocab_size = args.padded_vocab_size
 
-        samples_per_sec, tflops, approx_parameters_in_billions = throughput_calculator(model, args, elapsed_time, total_iterations)
+        samples_per_sec, tflops, approx_parameters_in_billions = throughput_calculator(
+            model, args, elapsed_time, total_iterations)
 
         # Compute throughput.
         samples_per_sec_per_replica = samples_per_sec / args.data_parallel_size
@@ -850,7 +904,7 @@ def training_log(loss_dict, total_loss_dict, learning_rate, iteration,
             if key not in [advanced_iters_key, skipped_iters_key,
                            nan_iters_key]:
                 avg = total_loss_dict[key].item() / \
-                      float(max(1, total_loss_dict[advanced_iters_key]))
+                    float(max(1, total_loss_dict[advanced_iters_key]))
                 if avg > 0.0:
                     log_string += ' {}: {:.6E} |'.format(key, avg)
                 total_loss_dict[key] = torch.cuda.FloatTensor([0.0])
@@ -862,7 +916,8 @@ def training_log(loss_dict, total_loss_dict, learning_rate, iteration,
         if params_norm is not None:
             log_string += ' params norm: {:.3f} |'.format(params_norm)
         if args.curriculum_learning:
-            log_string += ' curriculum seqlen: {:5d} |'.format(args.curriculum_seqlen)
+            log_string += ' curriculum seqlen: {:5d} |'.format(
+                args.curriculum_seqlen)
         log_string += ' number of skipped iterations: {:3d} |'.format(
             total_loss_dict[skipped_iters_key])
         log_string += ' number of nan iterations: {:3d} |'.format(
@@ -879,7 +934,6 @@ def training_log(loss_dict, total_loss_dict, learning_rate, iteration,
             report_memory_flag = False
         timers.log(timers_to_log, normalizer=args.log_interval)
 
-
     return report_memory_flag
 
 
@@ -892,7 +946,8 @@ def save_checkpoint_and_time(iteration, model, optimizer, lr_scheduler):
     save_checkpoint(iteration, model, optimizer, lr_scheduler)
     torch.distributed.barrier()
     timers('save-checkpoint').stop()
-    checkpoint_throughput_calculator(model, timers('save-checkpoint').elapsed(reset=False))
+    checkpoint_throughput_calculator(model, timers(
+        'save-checkpoint').elapsed(reset=False))
     timers.log(['save-checkpoint'])
 
 
@@ -918,19 +973,19 @@ def train(forward_step_func, model, optimizer, lr_scheduler,
     timers('interval-time').start()
     print_datetime('before the start of training step')
     report_memory_flag = True
-    while iteration < args.train_iters and (args.train_tokens is None or \
-        args.consumed_train_tokens < args.train_tokens):
+    while iteration < args.train_iters and (args.train_tokens is None or
+                                            args.consumed_train_tokens < args.train_tokens):
         update_num_microbatches(args.consumed_train_samples)
         if args.deepspeed:
             # inform deepspeed of any batch size changes
             global_batch_size = mpu.get_data_parallel_world_size() * \
-                                args.micro_batch_size * \
-                                get_num_microbatches()
+                args.micro_batch_size * \
+                get_num_microbatches()
             model[0].set_train_batch_size(global_batch_size)
 
         if args.curriculum_learning and not args.no_pipeline_parallel:
-            args.curriculum_seqlen = args.curriculum_scheduler.update_difficulty( \
-                    args.iteration + 1)
+            args.curriculum_seqlen = args.curriculum_scheduler.update_difficulty(
+                args.iteration + 1)
         loss_dict, skipped_iter, grad_norm, num_zeros_in_grad = \
             train_step(forward_step_func,
                        train_data_iterator,
@@ -941,8 +996,8 @@ def train(forward_step_func, model, optimizer, lr_scheduler,
         iteration += 1
         args.iteration = iteration
         new_samples = mpu.get_data_parallel_world_size() * \
-                                       args.micro_batch_size * \
-                                       get_num_microbatches()
+            args.micro_batch_size * \
+            get_num_microbatches()
         args.consumed_train_samples += new_samples
         if args.curriculum_learning:
             args.consumed_train_tokens += new_samples * args.curriculum_seqlen
@@ -998,7 +1053,8 @@ def train(forward_step_func, model, optimizer, lr_scheduler,
                 if not saved_checkpoint:
                     save_checkpoint_and_time(iteration, model, optimizer,
                                              lr_scheduler)
-                print_datetime('exiting program after {} minutes'.format(train_time))
+                print_datetime(
+                    'exiting program after {} minutes'.format(train_time))
                 sys.exit()
 
         # Exiting based on iterations
@@ -1009,7 +1065,6 @@ def train(forward_step_func, model, optimizer, lr_scheduler,
             torch.distributed.barrier()
             print_datetime('exiting program at iteration {}'.format(iteration))
             sys.exit()
-
 
     return iteration
 
@@ -1034,6 +1089,9 @@ def evaluate(forward_step_func, data_iterator, model, verbose=False):
 
     total_loss_dict = {}
 
+    avg_latency = 0
+    warmup = True
+
     with torch.no_grad():
         iteration = 0
         while iteration < args.eval_iters:
@@ -1049,17 +1107,36 @@ def evaluate(forward_step_func, data_iterator, model, verbose=False):
                     forward_backward_func = forward_backward_pipelining_without_interleaving
             else:
                 forward_backward_func = forward_backward_no_pipelining
-            
+
+            start = torch.cuda.Event(enable_timing=True)
+            end = torch.cuda.Event(enable_timing=True)
             if args.deepspeed and args.ds_pipeline_enabled:
                 # DeepSpeed uses eval_batch() and already aggregates losses.
                 assert isinstance(model, list) and len(model) == 1
+
+                start.record()
                 loss = model[0].eval_batch(data_iterator)
-                loss_dicts = [{'lm loss' : loss}] * get_num_microbatches()
+                end.record()
+
+                torch.cuda.synchronize()
+                if warmup:
+                    warmup = False
+                else:
+                    avg_latency += start.elapsed_time(end)
+                    # print(f"[RESULT] rank: {torch.cuda.current_device()}, elapsed: {start.elapsed_time(end)}")
+                loss_dicts = [{'lm loss': loss}] * get_num_microbatches()
             else:
+                start.record()
                 loss_dicts = forward_backward_func(
                     forward_step_func, data_iterator, model, optimizer=None,
                     timers=None, forward_only=True)
-            
+                end.record()
+                
+                if warmup:
+                    warmup = False
+                else:
+                    avg_latency += start.elapsed_time(end)
+
             if mpu.is_pipeline_last_stage(ignore_virtual=True):
                 # Reduce across processes.
                 for loss_dict in loss_dicts:
@@ -1069,8 +1146,8 @@ def evaluate(forward_step_func, data_iterator, model, verbose=False):
                                 key, torch.cuda.FloatTensor([0.0])) + loss_dict[key]
 
             args.consumed_valid_samples += mpu.get_data_parallel_world_size() \
-                                           * args.micro_batch_size \
-                                           * get_num_microbatches()
+                * args.micro_batch_size \
+                * get_num_microbatches()
     # Move model back to the train mode.
     for model_module in model:
         model_module.train()
@@ -1080,12 +1157,16 @@ def evaluate(forward_step_func, data_iterator, model, verbose=False):
 
     if args.curriculum_learning and not args.no_pipeline_parallel:
         # roll back to actual curriculum seqlen at the end of eval.
-        args.curriculum_seqlen = args.curriculum_scheduler.update_difficulty( \
+        args.curriculum_seqlen = args.curriculum_scheduler.update_difficulty(
             args.iteration + 1)
         if args.curriculum_seqlen < args.seq_length:
             model[0].reset_activation_shape()
 
+    print(
+        f"[RESULT] rank: {torch.cuda.current_device()}, avg_latency: {avg_latency / (args.eval_iters - 1)}ms")
+
     return total_loss_dict
+
 
 def evaluate_and_print_results(prefix, forward_step_func,
                                data_iterator, model,
@@ -1094,10 +1175,12 @@ def evaluate_and_print_results(prefix, forward_step_func,
     args = get_args()
     writer = get_tensorboard_writer()
 
-    total_loss_dict = evaluate(forward_step_func, data_iterator, model, verbose)
+    total_loss_dict = evaluate(
+        forward_step_func, data_iterator, model, verbose)
     string = ' validation loss at {} | '.format(prefix)
     for key in total_loss_dict:
-        string += '{} value: {:.6E} | '.format(key, total_loss_dict[key].item())
+        string += '{} value: {:.6E} | '.format(key,
+                                               total_loss_dict[key].item())
         ppl = math.exp(min(20, total_loss_dict[key].item()))
         string += '{} PPL: {:.6E} | '.format(key, ppl)
         if writer and is_last_rank():
@@ -1129,6 +1212,7 @@ def cyclic_iter(iter):
         for x in iter:
             yield x
 
+
 def build_train_valid_test_data_iterators(
         build_train_valid_test_datasets_provider):
     """XXX"""
@@ -1158,15 +1242,18 @@ def build_train_valid_test_data_iterators(
         else:
             train_samples = args.train_iters * args.global_batch_size
         eval_iters = (args.train_iters // args.eval_interval + 1) * \
-                     args.eval_iters
+            args.eval_iters
         test_iters = args.eval_iters
         train_val_test_num_samples = [train_samples,
                                       eval_iters * args.global_batch_size,
                                       test_iters * args.global_batch_size]
         print_rank_0(' > datasets target sizes (minimum size):')
-        print_rank_0('    train:      {}'.format(train_val_test_num_samples[0]))
-        print_rank_0('    validation: {}'.format(train_val_test_num_samples[1]))
-        print_rank_0('    test:       {}'.format(train_val_test_num_samples[2]))
+        print_rank_0('    train:      {}'.format(
+            train_val_test_num_samples[0]))
+        print_rank_0('    validation: {}'.format(
+            train_val_test_num_samples[1]))
+        print_rank_0('    test:       {}'.format(
+            train_val_test_num_samples[2]))
 
         # Build the datasets.
         train_ds, valid_ds, test_ds = build_train_valid_test_datasets_provider(
@@ -1197,26 +1284,25 @@ def build_train_valid_test_data_iterators(
     args.do_valid = flags[1].item()
     args.do_test = flags[2].item()
 
-
     # Build iterators.
     dl_type = args.dataloader_type
     assert dl_type in ['single', 'cyclic']
 
     if train_dataloader is not None:
         train_data_iterator = iter(train_dataloader) if dl_type == 'single' \
-                              else iter(cyclic_iter(train_dataloader))
+            else iter(cyclic_iter(train_dataloader))
     else:
         train_data_iterator = None
 
     if valid_dataloader is not None:
         valid_data_iterator = iter(valid_dataloader) if dl_type == 'single' \
-                              else iter(cyclic_iter(valid_dataloader))
+            else iter(cyclic_iter(valid_dataloader))
     else:
         valid_data_iterator = None
 
     if test_dataloader is not None:
         test_data_iterator = iter(test_dataloader) if dl_type == 'single' \
-                             else iter(cyclic_iter(test_dataloader))
+            else iter(cyclic_iter(test_dataloader))
     else:
         test_data_iterator = None
 

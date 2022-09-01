@@ -86,7 +86,8 @@ class GPTModel(MegatronModule):
             add_pooler=False,
             encoder_attn_mask_type=AttnMaskType.causal,
             init_method=init_method_normal(args.init_method_std),
-            scaled_init_method=scaled_init_method_normal(args.init_method_std, args.num_layers),
+            scaled_init_method=scaled_init_method_normal(
+                args.init_method_std, args.num_layers),
             num_experts=args.num_experts,
             pre_process=self.pre_process,
             post_process=self.post_process)
@@ -112,7 +113,8 @@ class GPTModel(MegatronModule):
                     labels = labels[:, :curriculum_seqlen].contiguous()
 
                 # attention_mask has size [1, 1, seqlen, seqlen]
-                attention_mask = attention_mask[:, :, :curriculum_seqlen, :curriculum_seqlen].contiguous()
+                attention_mask = attention_mask[:, :,
+                                                :curriculum_seqlen, :curriculum_seqlen].contiguous()
         else:
             if args.curriculum_learning:
                 # If got a None input, need to reset curriculum_seqlen on user side
@@ -127,13 +129,13 @@ class GPTModel(MegatronModule):
 
         if self.post_process:
             lm_output = post_language_model_processing(
-                    lm_output, labels,
-                    self.word_embeddings_weight(),
-                    get_key_value,
-                    self.parallel_output,
-                    forward_method_parallel_output,
-                    self.fp16_lm_cross_entropy)
-        
+                lm_output, labels,
+                self.word_embeddings_weight(),
+                get_key_value,
+                self.parallel_output,
+                forward_method_parallel_output,
+                self.fp16_lm_cross_entropy)
+
         if self.return_moe_loss:
             return (lm_output, *moe_losses)
         else:
@@ -144,12 +146,13 @@ class GPTModel(MegatronModule):
 
         state_dict_ = {}
         language_model_state_dict = self.language_model.state_dict_for_save_checkpoint(
-                destination, prefix, keep_vars)
+            destination, prefix, keep_vars)
         # MoE states need to be handled separately by DeepSpeed engine, thus
         # moving them to the top level dictionary
         if "moe_state_dict" in language_model_state_dict:
             for key in list(language_model_state_dict["moe_state_dict"].keys()):
-                state_dict_[key] = language_model_state_dict["moe_state_dict"].pop(key)
+                state_dict_[
+                    key] = language_model_state_dict["moe_state_dict"].pop(key)
             del language_model_state_dict["moe_state_dict"]
         state_dict_[self._language_model_key] = language_model_state_dict
         # Save word_embeddings.
@@ -182,13 +185,14 @@ def CrossEntropy(output, labels):
 
     args = get_args()
 
-    losses = mpu.vocab_parallel_cross_entropy(output.contiguous().float(), labels)
+    losses = mpu.vocab_parallel_cross_entropy(
+        output.contiguous().float(), labels)
     loss_mask = loss_mask.view(-1)
     loss = torch.sum(losses.view(-1) * loss_mask) / loss_mask.sum()
     return loss
 
 
-class GPTModelPipe(PipelineModule,MegatronModule):
+class GPTModelPipe(PipelineModule, MegatronModule):
     """GPT-2 Language model."""
 
     def __init__(self,
@@ -221,7 +225,7 @@ class GPTModelPipe(PipelineModule,MegatronModule):
                                         init_method=init_method,
                                         num_tokentypes=num_tokentypes,
                                         tied_weight_attr='word_embeddings_weight'))
-        
+
         if args.fp32_residual_connection:
             self.specs.append(lambda x: x.transpose(0, 1).contiguous().float())
         else:
@@ -230,13 +234,12 @@ class GPTModelPipe(PipelineModule,MegatronModule):
         for layer_idx in range(args.num_layers):
             self.specs.append(
                 LayerSpec(ParallelTransformerLayerPipe,
-                    init_method=init_method,
-                    output_layer_init_method=scaled_init_method_normal(args.init_method_std,
-                                                                       args.num_layers),
-                    layer_number=layer_idx,
-                    self_attn_mask_type=AttnMaskType.causal))
-                
-        
+                          init_method=init_method,
+                          output_layer_init_method=scaled_init_method_normal(args.init_method_std,
+                                                                             args.num_layers),
+                          layer_number=layer_idx,
+                          self_attn_mask_type=AttnMaskType.causal))
+
         # Undo data format change
         self.specs.append(lambda x: x.transpose(0, 1).contiguous())
 
@@ -274,7 +277,7 @@ class GPTModelPipe(PipelineModule,MegatronModule):
             interval = args.checkpoint_num_layers
         else:
             interval = 0
-        
+
         from deepspeed.runtime.pipe.topology import PipeModelDataParallelTopology
         topo = PipeModelDataParallelTopology(num_pp=mpu.get_pipeline_model_parallel_world_size(),
                                              num_mp=mpu.get_tensor_model_parallel_world_size(),

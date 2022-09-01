@@ -26,6 +26,7 @@ from megatron.model.transformer import ParallelTransformer
 from megatron.model.utils import get_linear_layer
 from megatron.model.utils import init_method_normal, scaled_init_method_normal
 
+
 def parallel_lm_logits(input_, word_embeddings_weight, parallel_output,
                        bias=None):
     """LM logits using word embedding weights."""
@@ -35,7 +36,8 @@ def parallel_lm_logits(input_, word_embeddings_weight, parallel_output,
     if bias is None:
         logits_parallel = F.linear(input_parallel, word_embeddings_weight)
     else:
-        logits_parallel = F.linear(input_parallel, word_embeddings_weight, bias)
+        logits_parallel = F.linear(
+            input_parallel, word_embeddings_weight, bias)
     # Gather if needed.
     if parallel_output:
         return logits_parallel
@@ -50,14 +52,12 @@ def get_language_model(num_tokentypes, add_pooler,
                        pre_process=True, post_process=True, num_experts=1):
     """Build language model and return along with the key to save."""
     args = get_args()
-
     if init_method is None:
         init_method = init_method_normal(args.init_method_std)
 
     if scaled_init_method is None:
         scaled_init_method = scaled_init_method_normal(args.init_method_std,
                                                        args.num_layers)
-
     # Language model.
     language_model = TransformerLanguageModel(
         init_method,
@@ -272,7 +272,7 @@ class EmbeddingPipe(Embedding):
             tokentype_ids = inputs[3]
         else:
             tokentype_ids = None
-        
+
         embeddings = super().forward(input_ids, position_ids, tokentype_ids=tokentype_ids)
 
         # If cmd args has attn_mask, we don't forward it as an activation.
@@ -281,7 +281,6 @@ class EmbeddingPipe(Embedding):
         else:
             assert False
             return embeddings, attention_mask
-
 
     @property
     def word_embeddings_weight(self):
@@ -313,6 +312,7 @@ class TransformerLanguageModel(MegatronModule):
                  pre_process=True,
                  post_process=True,
                  num_experts=1):
+
         super(TransformerLanguageModel, self).__init__()
         args = get_args()
 
@@ -387,9 +387,9 @@ class TransformerLanguageModel(MegatronModule):
         # encoder.
         if enc_hidden_states is None:
             encoder_output, *moe_losses = self.encoder(encoder_input,
-                                          enc_attn_mask,
-                                          layer_past=layer_past,
-                                          get_key_value=get_key_value)
+                                                       enc_attn_mask,
+                                                       layer_past=layer_past,
+                                                       get_key_value=get_key_value)
         else:
             encoder_output = enc_hidden_states.to(encoder_input.dtype)
             moe_losses = []
@@ -398,7 +398,6 @@ class TransformerLanguageModel(MegatronModule):
             if self.add_pooler:
                 pooled_output = self.pooler(encoder_output,
                                             pooling_sequence_index)
-
         # output_enc_hidden refers to when we just need the encoder's
         # output. For example, it is helpful to compute
         # similarity between two sequences by average pooling
@@ -413,11 +412,11 @@ class TransformerLanguageModel(MegatronModule):
                                               dec_position_ids)
         # decoder
         decoder_output, *moe_losses = self.decoder(dec_embedding_output,
-                                      dec_attn_mask,
-                                      layer_past=layer_past,
-                                      get_key_value=get_key_value,
-                                      encoder_output=encoder_output,
-                                      enc_dec_attn_mask=enc_dec_attn_mask)
+                                                   dec_attn_mask,
+                                                   layer_past=layer_past,
+                                                   get_key_value=get_key_value,
+                                                   encoder_output=encoder_output,
+                                                   enc_dec_attn_mask=enc_dec_attn_mask)
 
         if self.add_pooler and self.post_process:
             return (decoder_output, encoder_output, pooled_output, *moe_losses)
@@ -435,14 +434,15 @@ class TransformerLanguageModel(MegatronModule):
                 = self.embedding.state_dict_for_save_checkpoint(
                     destination, prefix, keep_vars)
         encoder_state_dict = self.encoder.state_dict_for_save_checkpoint(
-                destination, prefix, keep_vars)
+            destination, prefix, keep_vars)
         # MoE states need to be handled separately by DeepSpeed engine, thus
         # moving them to the top level dictionary
         # If components other than encoder may contain MoE states, need to add
         # the same logic
         for key in list(encoder_state_dict.keys()):
             if 'expert' in key and 'moe.gate.wg.weight' not in key:
-                moe_state_dict[self._encoder_key+key] = encoder_state_dict.pop(key)
+                moe_state_dict[self._encoder_key +
+                               key] = encoder_state_dict.pop(key)
         state_dict_[self._encoder_key] = encoder_state_dict
         if self.post_process:
             if self.add_pooler:
@@ -493,7 +493,7 @@ class TransformerLanguageModel(MegatronModule):
         for key in state_dict_.keys():
             if '.attention.' in key and key not in encoder_state_dict_keys:
                 state_dict_self_attention[key.replace(".attention.",
-                    ".self_attention.")] = state_dict_[key]
+                                                      ".self_attention.")] = state_dict_[key]
             else:
                 state_dict_self_attention[key] = state_dict_[key]
         state_dict_ = state_dict_self_attention
@@ -507,7 +507,8 @@ class TransformerLanguageModel(MegatronModule):
                         key_list.pop(0)
                     key_list.pop(0)
                     actual_key = '.'.join(key_list)
-                    state_dict_[actual_key] = state_dict["moe_state_dict"].pop(key)
+                    state_dict_[
+                        actual_key] = state_dict["moe_state_dict"].pop(key)
             if len(state_dict["moe_state_dict"]) == 0:
                 del state_dict["moe_state_dict"]
         self.encoder.load_state_dict(state_dict_, strict=strict)

@@ -13,3 +13,16 @@ dist/
 
 # AML workspace config file
 *config.json
+
+# log files
+*.txt
+*.bin
+*.idx
+/dataset/*
+checkpoints/
+*.gz
+examples/MoE/log
+examples/MoE/output
+*.nsys-rep
+/output
+/examples/MoE/*.json

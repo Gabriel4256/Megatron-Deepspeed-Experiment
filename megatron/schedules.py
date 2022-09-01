@@ -27,6 +27,7 @@ from megatron.utils import unwrap_model
 from megatron.model import DistributedDataParallel as LocalDDP
 from megatron.model import Float16Module
 
+
 def get_forward_backward_func():
     args = get_args()
     if mpu.get_pipeline_model_parallel_world_size() > 1:
@@ -58,7 +59,8 @@ def forward_step(forward_step_func, data_iterator, model, input_tensor, losses_r
     else:
         unwrapped_model.module.set_input_tensor(input_tensor)
 
-    output_tensor, loss_func = forward_step_func(data_iterator, model, teacher_model)
+    output_tensor, loss_func = forward_step_func(
+        data_iterator, model, teacher_model)
     if mpu.is_pipeline_last_stage():
         output_tensor = loss_func(output_tensor)
         loss, loss_reduced = output_tensor
@@ -157,7 +159,8 @@ def forward_backward_no_pipelining(forward_step_func, data_iterator, model,
     output_tensor = forward_step(forward_step_func, data_iterator, model,
                                  input_tensor, losses_reduced, teacher_model)
     if not forward_only:
-        backward_step(optimizer, input_tensor, output_tensor, output_tensor_grad, model)
+        backward_step(optimizer, input_tensor, output_tensor,
+                      output_tensor_grad, model)
 
     return losses_reduced
 
@@ -168,9 +171,8 @@ def forward_backward_pipelining_with_interleaving(forward_step_func, data_iterat
     communication between pipeline stages as needed.
 
     Returns dictionary with losses if the last stage, empty dict otherwise."""
-    
     assert teacher_model is None, 'MoS has not been supported in pipeline parallelism'
-    
+
     input_tensors = [[] for _ in range(len(model))]
     output_tensors = [[] for _ in range(len(model))]
     losses_reduced = []
@@ -208,7 +210,8 @@ def forward_backward_pipelining_with_interleaving(forward_step_func, data_iterat
 
     def get_model_chunk_id(microbatch_id, forward):
         """Helper method to get the model chunk ID given the iteration number."""
-        microbatch_id_in_group = microbatch_id % (pipeline_parallel_size * num_model_chunks)
+        microbatch_id_in_group = microbatch_id % (
+            pipeline_parallel_size * num_model_chunks)
         model_chunk_id = microbatch_id_in_group // pipeline_parallel_size
         if not forward:
             model_chunk_id = (num_model_chunks - model_chunk_id - 1)
@@ -285,9 +288,9 @@ def forward_backward_pipelining_with_interleaving(forward_step_func, data_iterat
                 recv_next = False
             input_tensor, output_tensor_grad = \
                 p2p_communication.send_forward_backward_recv_forward_backward(
-                        output_tensor, input_tensor_grad,
-                        recv_prev=recv_prev, recv_next=recv_next,
-                        timers=timers)
+                    output_tensor, input_tensor_grad,
+                    recv_prev=recv_prev, recv_next=recv_next,
+                    timers=timers)
             output_tensor_grads[num_model_chunks-1].append(output_tensor_grad)
         else:
             input_tensor = \
@@ -354,9 +357,9 @@ def forward_backward_pipelining_with_interleaving(forward_step_func, data_iterat
         # Communicate tensors.
         input_tensor, output_tensor_grad = \
             p2p_communication.send_forward_backward_recv_forward_backward(
-                    output_tensor, input_tensor_grad,
-                    recv_prev=recv_prev, recv_next=recv_next,
-                    timers=timers)
+                output_tensor, input_tensor_grad,
+                recv_prev=recv_prev, recv_next=recv_next,
+                timers=timers)
 
         # Put input_tensor and output_tensor_grad in data structures in the
         # right location.
@@ -373,7 +376,8 @@ def forward_backward_pipelining_with_interleaving(forward_step_func, data_iterat
                 p2p_communication.recv_backward(timers))
         for k in range(num_microbatches_remaining, num_microbatches):
             input_tensor_grad = backward_step_helper(k)
-            next_backward_model_chunk_id = get_model_chunk_id(k+1, forward=False)
+            next_backward_model_chunk_id = get_model_chunk_id(
+                k+1, forward=False)
             recv_next = True
             if mpu.is_pipeline_last_stage(ignore_virtual=True):
                 if next_backward_model_chunk_id == (num_model_chunks - 1):
@@ -394,9 +398,8 @@ def forward_backward_pipelining_without_interleaving(forward_step_func, data_ite
     stages.
 
     Returns dictionary with losses if the last stage, empty dict otherwise."""
-    
     assert teacher_model is None, 'MoS has not been supported in pipeline parallelism'
-    
+
     timers = get_timers()
 
     assert len(model) == 1
@@ -455,7 +458,8 @@ def forward_backward_pipelining_without_interleaving(forward_step_func, data_ite
             if not last_iteration:
                 input_tensor = p2p_communication.recv_forward(timers)
         else:
-            input_tensor, output_tensor = input_tensors.pop(0), output_tensors.pop(0)
+            input_tensor, output_tensor = input_tensors.pop(
+                0), output_tensors.pop(0)
 
             input_tensor_grad = \
                 backward_step(optimizer, input_tensor, output_tensor,

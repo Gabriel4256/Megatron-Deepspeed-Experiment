@@ -125,6 +125,7 @@ def _communicate(tensor_send_next, tensor_send_prev, recv_prev, recv_next,
 
 
 def recv_forward(timers=None):
+    torch.cuda.nvtx.range_push("recv forward")
     """Receive tensor from previous rank in pipeline (forward receive)."""
     if mpu.is_pipeline_first_stage():
         input_tensor = None
@@ -138,6 +139,7 @@ def recv_forward(timers=None):
             recv_next=False)
         if timers is not None:
             timers('forward-recv').stop()
+    torch.cuda.nvtx.range_pop()
     return input_tensor
 
 
@@ -159,6 +161,7 @@ def recv_backward(timers=None):
 
 
 def send_forward(output_tensor, timers=None):
+    torch.cuda.nvtx.range_push("send forward")
     """Send tensor to next rank in pipeline (forward send)."""
     if not mpu.is_pipeline_last_stage():
         if timers is not None:
@@ -170,9 +173,10 @@ def send_forward(output_tensor, timers=None):
             recv_next=False)
         if timers is not None:
             timers('forward-send').stop()
-
+    torch.cuda.nvtx.range_pop()
 
 def send_backward(input_tensor_grad, timers=None):
+    torch.cuda.nvtx.range_push("send backward")
     """Send tensor to previous rank in pipeline (backward send)."""
     if not mpu.is_pipeline_first_stage():
         if timers is not None:
@@ -184,6 +188,8 @@ def send_backward(input_tensor_grad, timers=None):
             recv_next=False)
         if timers is not None:
             timers('backward-send').stop()
+    torch.cuda.nvtx.range_pop()
+    
 
 
 def send_forward_recv_backward(output_tensor, timers=None):

@@ -464,6 +464,14 @@ def forward_step(model, tokens, position_ids, attention_mask, tokentype_ids,
     elif args.deepspeed or args.ds_inference:
         unwrapped_model.module.set_input_tensor(input_tensor)
 
+    # tokens = torch.rand(tokens.size())
+    # position_ids = torch.rand(position_ids.size()).long().cuda()
+
+    print(f"tokens: {tokens}")
+    print(f"position_ids: {position_ids}")
+    print(f"attention_mask: {attention_mask}")
+    
+
     output_tensor = model(tokens, position_ids, attention_mask,
                           tokentype_ids=tokentype_ids,
                           layer_past=layer_past,

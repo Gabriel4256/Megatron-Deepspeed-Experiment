@@ -50,6 +50,7 @@ torch._C._jit_override_can_fuse_on_gpu(True)
         hyperparameters: transformer hyperparameters
 """
 
+
 class ParallelMLP(MegatronModule):
     """MLP.
 
@@ -72,7 +73,7 @@ class ParallelMLP(MegatronModule):
             skip_bias_add=True,
             moe=moe,
             enable_expert_tensor_parallelism=enable_expert_tensor_parallelism
-            )
+        )
 
         self.bias_gelu_fusion = args.bias_gelu_fusion
         self.activation_func = F.gelu
@@ -94,18 +95,25 @@ class ParallelMLP(MegatronModule):
     def forward(self, hidden_states):
 
         # [s, b, 4hp]
-        intermediate_parallel, bias_parallel = self.dense_h_to_4h(hidden_states)
+        intermediate_parallel, bias_parallel = self.dense_h_to_4h(
+            hidden_states)
 
         if self.bias_gelu_fusion:
-             intermediate_parallel = \
-                     bias_gelu_impl(intermediate_parallel, bias_parallel)
+            intermediate_parallel = \
+                bias_gelu_impl(intermediate_parallel, bias_parallel)
         else:
             intermediate_parallel = \
                 self.activation_func(intermediate_parallel + bias_parallel)
 
         # [s, b, h]
+        import torch.cuda.nvtx as nvtx
+        
+        nvtx.range_push("MLPRowparallel")
         output, output_bias = self.dense_4h_to_h(intermediate_parallel)
+        nvtx.range_pop()
+        
         return output, output_bias
+
 
 class ParallelAttention(MegatronModule):
     """Parallel self-attention layer abstract class.
@@ -202,17 +210,18 @@ class ParallelAttention(MegatronModule):
         # =====================
         # Query, Key, and Value
         # =====================
-
         if self.attention_type == AttnType.self_attn:
             # Attention heads [sq, b, h] --> [sq, b, (np * 3 * hn)]
+            # NOTE: rank별로 output이 다름
             mixed_x_layer, _ = self.query_key_value(hidden_states)
-
+            
+            
+            # np = number of model tensor parallelism
             # [sq, b, (np * 3 * hn)] --> [sq, b, np, 3 * hn]
             new_tensor_shape = mixed_x_layer.size()[:-1] + \
                 (self.num_attention_heads_per_partition,
                  3 * self.hidden_size_per_attention_head)
             mixed_x_layer = mixed_x_layer.view(*new_tensor_shape)
-
             # [sq, b, np, 3 * hn] --> 3 [sq, b, np, hn]
             (query_layer,
              key_layer,
@@ -355,8 +364,11 @@ class ParallelAttention(MegatronModule):
         # =================
         # Output. [sq, b, h]
         # =================
+        import torch.cuda.nvtx as nvtx
 
+        nvtx.range_push("AttentionRowparallel")
         output, bias = self.dense(context_layer)
+        nvtx.range_pop()
 
         if get_key_value:
             output = [output, present]
@@ -446,38 +458,57 @@ class ParallelTransformerLayer(MegatronModule):
         # MLP
         if self.num_experts <= 1:
             self.mlp = ParallelMLP(init_method,
-                               output_layer_init_method)
+                                   output_layer_init_method)
         else:
             enable_expert_tensor_parallelism = args.enable_expert_tensor_parallelism
             self.mlp = MoE(args.hidden_size,
-                            ParallelMLP(init_method,
-                                output_layer_init_method=output_layer_init_method,
-                                moe=True,
-                                enable_expert_tensor_parallelism=enable_expert_tensor_parallelism),
-                            num_experts=self.num_experts, 
-                            ep_size=args.moe_expert_parallel_size,
-                            k=args.topk,
-                            use_residual=(args.mlp_type == 'residual'),
-                            capacity_factor=args.moe_train_capacity_factor,
-                            eval_capacity_factor=args.moe_eval_capacity_factor,
-                            min_capacity=args.moe_min_capacity,
-                            drop_tokens=args.moe_token_dropping, use_tutel=args.use_tutel,
-                            enable_expert_tensor_parallelism=enable_expert_tensor_parallelism) 
+                           ParallelMLP(init_method,
+                                       output_layer_init_method=output_layer_init_method,
+                                       moe=True,
+                                       enable_expert_tensor_parallelism=enable_expert_tensor_parallelism),
+                           num_experts=self.num_experts,
+                           ep_size=args.moe_expert_parallel_size,
+                           k=args.topk,
+                           use_residual=(args.mlp_type == 'residual'),
+                           capacity_factor=args.moe_train_capacity_factor,
+                           eval_capacity_factor=args.moe_eval_capacity_factor,
+                           min_capacity=args.moe_min_capacity,
+                           drop_tokens=args.moe_token_dropping, use_tutel=args.use_tutel,
+                           enable_expert_tensor_parallelism=enable_expert_tensor_parallelism)
 
     def forward(self, hidden_states, attention_mask,
                 encoder_output=None, enc_dec_attn_mask=None,
                 layer_past=None, get_key_value=False):
         # hidden_states: [b, s, h]
+        from torch.profiler import profile, record_function, ProfilerActivity
+        import torch.cuda.nvtx as nvtx
 
+        # nvtx.range_push("ParallelTransformer")
+        #  with torch.no_grad():
+        # with profile(
+        #     activities=[ProfilerActivity.CPU, ProfilerActivity.CUDA],
+        #     profile_memory=True,
+        #     record_shapes=True,
+        #     # on_trace_ready=torch.profiler.tensorboard_trace_handler('./log/moe_swin'),
+        # ) as prof:
+
+        #     with record_function("ParallelTransformer"):
         # Layer norm at the beginning of the transformer layer.
         layernorm_output = self.input_layernorm(hidden_states)
+
+
+        # 여기까지는 모든 rank의 gpu들이 동일한 input을 받음 
+
+        nvtx.range_push("SelfAttention")
+
         # Self attention.
         attention_output, attention_bias = \
             self.attention(layernorm_output,
-                                attention_mask,
-                                layer_past=layer_past,
-                                get_key_value=get_key_value)
-
+                           attention_mask,
+                           layer_past=layer_past,
+                           get_key_value=get_key_value)
+        nvtx.range_pop()
+        
         if get_key_value:
             attention_output, presents = attention_output
 
@@ -530,11 +561,14 @@ class ParallelTransformerLayer(MegatronModule):
                     self.hidden_dropout)
 
             # Layer norm post the decoder attention
-            layernorm_output = self.post_inter_attention_layernorm(layernorm_input)
+            layernorm_output = self.post_inter_attention_layernorm(
+                layernorm_input)
 
         # MLP.
-        moe_loss = torch.tensor(0.0, device=layernorm_output.device, dtype=layernorm_output.dtype)
-        mlp_bias = torch.tensor(0.0, device=layernorm_output.device, dtype=layernorm_output.dtype)
+        moe_loss = torch.tensor(
+            0.0, device=layernorm_output.device, dtype=layernorm_output.dtype)
+        mlp_bias = torch.tensor(
+            0.0, device=layernorm_output.device, dtype=layernorm_output.dtype)
 
         if self.num_experts == 1:
             mlp_output, mlp_bias = self.mlp(layernorm_output)
@@ -549,19 +583,23 @@ class ParallelTransformerLayer(MegatronModule):
 
         # re-enable torch grad to enable fused optimization.
         with torch.enable_grad():
-            #if self.num_experts <= 1:
+            # if self.num_experts <= 1:
             output = bias_dropout_add_func(
-                    mlp_output,
-                    mlp_bias.expand_as(residual),
-                    residual,
-                    self.hidden_dropout)
-            #else:
+                mlp_output,
+                mlp_bias.expand_as(residual),
+                residual,
+                self.hidden_dropout)
+            # else:
             #    output = mlp_output + residual
 
         if get_key_value:
             output = [output, presents]
 
+        # prof.export_chrome_trace(f"./trace{dist.get_rank()}.json")
+        # nvtx.range_pop()
+
         return output, moe_loss
+
 
 class ParallelTransformerLayerPipe(ParallelTransformerLayer):
     """Extends ParallelTransformerLayer to forward attention_mask through the pipeline.
@@ -583,6 +621,7 @@ class ParallelTransformerLayerPipe(ParallelTransformerLayer):
        If no mask is provided, the module will query `self._args.attn_mask`
        for the mask and only return `super().forward(...)`
     """
+
     def forward(self, inputs, **kwargs):
         assert torch.is_tensor(inputs) or isinstance(inputs, tuple)
         if torch.is_tensor(inputs) or len(inputs) == 1:
@@ -613,7 +652,7 @@ class ParallelTransformer(MegatronModule):
 
         super(ParallelTransformer, self).__init__()
         args = get_args()
-    
+
         self.bf16 = args.bf16
         self.fp32_residual_connection = args.fp32_residual_connection
         self.pre_process = pre_process
@@ -661,13 +700,14 @@ class ParallelTransformer(MegatronModule):
         else:
             # Each stage gets a contiguous set of layers.
             offset = mpu.get_pipeline_model_parallel_rank() * self.num_layers
-            
+
         assert len(num_experts) == 1 or len(num_experts) == self.num_layers // args.expert_interval, \
-        'num_experts must be either a single value or a list of the same length as the number of MoE layers'
+            'num_experts must be either a single value or a list of the same length as the number of MoE layers'
 
         # Create the list of MoE experts
         if len(num_experts) == 1:
-            num_experts = num_experts * (self.num_layers // args.expert_interval)
+            num_experts = num_experts * \
+                (self.num_layers // args.expert_interval)
 
         self.layers = []
         # Build the layers
@@ -678,6 +718,7 @@ class ParallelTransformer(MegatronModule):
             else:
                 n_e = 1
             self.layers.append(build_layer(layer_num, n_e))
+        print(self.layers)
 
         self.layers = torch.nn.ModuleList(self.layers)
 
@@ -691,6 +732,7 @@ class ParallelTransformer(MegatronModule):
             global get_cuda_rng_tracker, checkpoint
             get_cuda_rng_tracker = deepspeed.checkpointing.get_cuda_rng_tracker
             checkpoint = deepspeed.checkpointing.checkpoint
+
     def _get_layer(self, layer_number):
         return self.layers[layer_number]
 
@@ -706,7 +748,8 @@ class ParallelTransformer(MegatronModule):
                 moe_losses = []
                 for index in range(start, end):
                     layer = self._get_layer(index)
-                    x_, moe_loss = layer(x_, attention_mask, encoder_output, enc_dec_attn_mask)
+                    x_, moe_loss = layer(
+                        x_, attention_mask, encoder_output, enc_dec_attn_mask)
                     moe_losses.append(moe_loss)
                 return (x_, *moe_losses)
             return custom_forward
@@ -736,7 +779,6 @@ class ParallelTransformer(MegatronModule):
 
     def forward(self, hidden_states, attention_mask, layer_past=None,
                 get_key_value=False, encoder_output=None, enc_dec_attn_mask=None):
-
         # Checks.
         if layer_past is not None:
             assert get_key_value, \
@@ -753,7 +795,8 @@ class ParallelTransformer(MegatronModule):
                 # Data format change to avoid explicit tranposes : [b s h] --> [s b h].
                 # If the input flag for fp32 residual connection is set, convert for float.
                 if self.fp32_residual_connection:
-                    hidden_states = hidden_states.transpose(0, 1).contiguous().float()
+                    hidden_states = hidden_states.transpose(
+                        0, 1).contiguous().float()
                 # Otherwise, leave it as is.
                 else:
                     hidden_states = hidden_states.transpose(0, 1).contiguous()
@@ -762,14 +805,14 @@ class ParallelTransformer(MegatronModule):
                 hidden_states = self.input_tensor
 
             if encoder_output is not None:
-                 encoder_output = encoder_output.transpose(0, 1).contiguous()
+                encoder_output = encoder_output.transpose(0, 1).contiguous()
 
         moe_losses = []
         if self.checkpoint_activations:
             hidden_states, moe_losses = self._checkpointed_forward(hidden_states,
-                                                       attention_mask,
-                                                       encoder_output,
-                                                       enc_dec_attn_mask)
+                                                                   attention_mask,
+                                                                   encoder_output,
+                                                                   enc_dec_attn_mask)
         else:
             if get_key_value:
                 presents = []
@@ -778,12 +821,24 @@ class ParallelTransformer(MegatronModule):
                 past = None
                 if layer_past is not None:
                     past = layer_past[index]
+                # print(layer.modules)
+
+                # print(hidden_states)
+                # print(attention_mask)
+                # print(encoder_output)
+                # print(enc_dec_attn_mask)
+                # print(past)
+                # print(get_key_value)
+
+                layer = layer.cuda()
+
                 hidden_states = layer(hidden_states,
                                       attention_mask,
                                       encoder_output=encoder_output,
                                       enc_dec_attn_mask=enc_dec_attn_mask,
                                       layer_past=past,
                                       get_key_value=get_key_value)
+
                 if not self.ds_inference:
                     hidden_states, moe_loss = hidden_states
                     moe_losses.append(moe_loss)
@@ -799,6 +854,7 @@ class ParallelTransformer(MegatronModule):
             output = self.final_layernorm(hidden_states)
         else:
             output = hidden_states
+
         if get_key_value:
             output = [output, presents]
 

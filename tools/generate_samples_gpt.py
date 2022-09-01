@@ -15,6 +15,18 @@
 
 """Sample Generate GPT"""
 
+import torch
+from megatron.text_generation_utils import generate_samples_interactive
+from megatron.text_generation_utils import generate_samples_input_from_file
+from megatron.text_generation_utils import generate_and_write_samples_unconditional
+from megatron.training import get_model
+from megatron.model import GPTModel
+from megatron.initialize import initialize_megatron
+from megatron.checkpointing import load_checkpoint
+from megatron import mpu
+from megatron import get_tokenizer
+from megatron import print_rank_0
+from megatron import get_args
 import deepspeed
 
 import os
@@ -22,27 +34,14 @@ import sys
 sys.path.append(os.path.abspath(os.path.join(os.path.dirname(__file__),
                                              os.path.pardir)))
 
-from megatron import get_args
-from megatron import print_rank_0
-from megatron import get_tokenizer
-from megatron import mpu
-from megatron.checkpointing import load_checkpoint
-from megatron.initialize import initialize_megatron
-from megatron.model import GPTModel
-from megatron.training import get_model
-from megatron.text_generation_utils import generate_and_write_samples_unconditional
-from megatron.text_generation_utils import generate_samples_input_from_file
-from megatron.text_generation_utils import generate_samples_interactive
-import deepspeed
-import torch
 
 def model_provider(pre_process=True, post_process=True):
     """Build the model."""
 
     print_rank_0('building GPT model ...')
     model = GPTModel(num_tokentypes=0, parallel_output=False,
-                     pre_process=pre_process, post_process=post_process, 
-                     return_moe_loss=False) # we need to set "return_moe_loss" for the inference_mode
+                     pre_process=pre_process, post_process=post_process,
+                     return_moe_loss=False)  # we need to set "return_moe_loss" for the inference_mode
     return model
 
 
@@ -76,6 +75,7 @@ def add_text_generate_args(parser):
 
     return parser
 
+
 def print_latency(latency_set, title=""):
     # 10 warmup queries
     latency_set = latency_set[10:]
@@ -102,7 +102,8 @@ def print_latency(latency_set, title=""):
         print("\tP95 Latency: {0:8.2f} ms".format(p95 * 1000))
         print("\tP99 Latency: {0:8.2f} ms".format(p99 * 1000))
         print("\t999 Latency: {0:8.2f} ms".format(p999 * 1000))
-        
+
+
 def main():
     """Main program."""
     latencies = []
@@ -115,7 +116,7 @@ def main():
                                        'no_load_optim': True})
 
     args = get_args()
-    
+
     if args.num_layers_per_virtual_pipeline_stage is not None:
         print("Interleaved pipeline schedule is not yet supported for text generation.")
         exit()
@@ -141,27 +142,29 @@ def main():
         else:
             generate_samples_interactive(model)
     else:
-        generate_and_write_samples_unconditional(model, latencies, single_token_latency, model_latencies)
-    
-    
-    #if torch.cuda.current_device() == 0:
+        generate_and_write_samples_unconditional(
+            model, latencies, single_token_latency, model_latencies)
+
+    # if torch.cuda.current_device() == 0:
     if torch.distributed.get_rank() == 0:
         print_latency(latencies)
         print_latency(model_latencies, "model_latencies")
         print_latency(single_token_latency, "single_token_latency")
 
 
+# import megatron.model as mm
 def ds_inference(model, args):
-    import megatron.model as mm
     engine = deepspeed.init_inference(model=model,
-                                      mp_size=args.tensor_model_parallel_size, 
+                                      mp_size=args.tensor_model_parallel_size,
                                       mpu=mpu,
                                       dtype=torch.half,
                                       replace_with_kernel_inject=True,
                                       moe_experts=args.num_experts,
-                                      moe_type=args.mlp_type)
-    
+                                      moe_type=args.mlp_type,
+                                      replace_method='auto', moe=True)
+    # engine.module(torch.rand([8,1]), torch.tensor(33).int(), torch.rand([1,1,10,10]))
     return engine.module
+
 
 if __name__ == "__main__":
 
