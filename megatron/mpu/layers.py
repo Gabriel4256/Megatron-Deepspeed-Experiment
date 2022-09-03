@@ -411,13 +411,13 @@ class RowParallelLinear(torch.nn.Module):
         if self.is_expert_without_slicing: # non-expert only tensor-parallelism
             output_ = output_parallel
         else:
-            start = torch.cuda.Event(enable_timing=True)
-            end = torch.cuda.Event(enable_timing=True)
-            start.record()
+            # start = torch.cuda.Event(enable_timing=True)
+            # end = torch.cuda.Event(enable_timing=True)
+            # start.record()
             output_ = reduce_from_tensor_model_parallel_region(output_parallel)
-            end.record()
-            end.synchronize()
-            print(f'[RANK {get_tensor_model_parallel_rank()}] all_reduce latency: {start.elapsed_time(end)}')
+            # end.record()
+            # end.synchronize()
+            # print(f'[RANK {get_tensor_model_parallel_rank()}] all_reduce latency: {start.elapsed_time(end)}')
     
         if not self.skip_bias_add:
             output = output_ + self.bias if self.bias is not None else output_

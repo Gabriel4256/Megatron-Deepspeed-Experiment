@@ -501,12 +501,18 @@ class ParallelTransformerLayer(MegatronModule):
 
         nvtx.range_push("SelfAttention")
 
+        start = torch.cuda.Event(enable_timing=True)
+        end = torch.cuda.Event(enable_timing=True)
+        start.record()
         # Self attention.
         attention_output, attention_bias = \
             self.attention(layernorm_output,
                            attention_mask,
                            layer_past=layer_past,
                            get_key_value=get_key_value)
+        end.record()
+        end.synchronize()
+        print(f'[RANK {mpu.get_tensor_model_parallel_rank()}] selfattention forward latency: {start.elapsed_time(end)}')
         nvtx.range_pop()
         
         if get_key_value:
@@ -571,7 +577,13 @@ class ParallelTransformerLayer(MegatronModule):
             0.0, device=layernorm_output.device, dtype=layernorm_output.dtype)
 
         if self.num_experts == 1:
+            start = torch.cuda.Event(enable_timing=True)
+            end = torch.cuda.Event(enable_timing=True)
+            start.record()
             mlp_output, mlp_bias = self.mlp(layernorm_output)
+            end.record()
+            end.synchronize()
+            print(f'[RANK {mpu.get_tensor_model_parallel_rank()}] mlp forward latency: {start.elapsed_time(end)}')
         else:
             mlp_output, moe_loss, _ = self.mlp(layernorm_output)
 
