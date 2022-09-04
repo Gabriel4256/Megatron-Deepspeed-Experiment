@@ -9,77 +9,89 @@ SEQ_LEN=2048
 ### https://arxiv.org/abs/2005.14165, choose based on
 ### your desired model size or build your own configs
 
-## GPT-3 Small 125M
+GLOBAL_BATCH_SIZE=$1
+MODEL_SIZE=$3
+
+if [ "${MODEL_SIZE}" = "125M" ]; then
+# GPT-3 Small 125M
 MODEL_SIZE=0.125
 NUM_LAYERS=12
 HIDDEN_SIZE=768
 NUM_ATTN_HEADS=12
-GLOBAL_BATCH_SIZE=$1
 # LR=6.0e-4
 # MIN_LR=6.0e-5
+fi
 
+if [ "${MODEL_SIZE}" = "350M" ]; then
 ## GPT-3 Medium 350M
-# MODEL_SIZE=0.35
-# NUM_LAYERS=24
-# HIDDEN_SIZE=1024
-# NUM_ATTN_HEADS=16
-# GLOBAL_BATCH_SIZE=256
+MODEL_SIZE=0.35
+NUM_LAYERS=24
+HIDDEN_SIZE=1024
+NUM_ATTN_HEADS=16
 # LR=3.0e-4
 # MIN_LR=3.0e-5
+fi
 
+if [ "${MODEL_SIZE}" = "760M" ]; then
 ## GPT-3 Large 760M
-# MODEL_SIZE=0.76
-# NUM_LAYERS=24
-# HIDDEN_SIZE=1536
-# NUM_ATTN_HEADS=16
-# GLOBAL_BATCH_SIZE=256
+MODEL_SIZE=0.76
+NUM_LAYERS=24
+HIDDEN_SIZE=1536
+NUM_ATTN_HEADS=16
 # LR=2.5e-4
 # MIN_LR=2.5e-5
+fi
 
+
+if [ "${MODEL_SIZE}" = "1.3B" ]; then
 ## GPT-3 XL 1.3B
-# MODEL_SIZE=1.3
-# NUM_LAYERS=24
-# HIDDEN_SIZE=2048
-# NUM_ATTN_HEADS=16
-# GLOBAL_BATCH_SIZE=512
+MODEL_SIZE=1.3
+NUM_LAYERS=24
+HIDDEN_SIZE=2048
+NUM_ATTN_HEADS=16
 # LR=2.0e-4
 # MIN_LR=2.0e-5
+fi
 
+if [ "${MODEL_SIZE}" = "2.7B" ]; then
 ## GPT-3 2.7B
-# MODEL_SIZE=2.7
-# NUM_LAYERS=32
-# HIDDEN_SIZE=2560
-# NUM_ATTN_HEADS=32
-# GLOBAL_BATCH_SIZE=512
+MODEL_SIZE=2.7
+NUM_LAYERS=32
+HIDDEN_SIZE=2560
+NUM_ATTN_HEADS=32
 # LR=1.6e-4
 # MIN_LR=1.6e-5
+fi
 
+if [ "${MODEL_SIZE}" = "6.7B" ]; then
 ## GPT-3 6.7B
-# MODEL_SIZE=6.7
-# NUM_LAYERS=32
-# HIDDEN_SIZE=4096
-# NUM_ATTN_HEADS=32
-# GLOBAL_BATCH_SIZE=1024
+MODEL_SIZE=6.7
+NUM_LAYERS=32
+HIDDEN_SIZE=4096
+NUM_ATTN_HEADS=32
 # LR=1.2e-4
 # MIN_LR=1.2e-5
+fi
 
+if [ "${MODEL_SIZE}" = "13B" ]; then
 ## GPT-3 13B
-# MODEL_SIZE=13
-# NUM_LAYERS=40
-# HIDDEN_SIZE=5120
-# NUM_ATTN_HEADS=40
-# GLOBAL_BATCH_SIZE=1024
+MODEL_SIZE=13
+NUM_LAYERS=40
+HIDDEN_SIZE=5120
+NUM_ATTN_HEADS=40
 # LR=1.0e-4
 # MIN_LR=1.0e-5
+fi
 
+if [ "${MODEL_SIZE}" = "175B" ]; then
 ## GPT-3 175B
-# MODEL_SIZE=175
-# NUM_LAYERS=96
-# HIDDEN_SIZE=12288
-# NUM_ATTN_HEADS=96
-# GLOBAL_BATCH_SIZE=1536
+MODEL_SIZE=175
+NUM_LAYERS=96
+HIDDEN_SIZE=12288
+NUM_ATTN_HEADS=96
 # LR=0.6e-4
 # MIN_LR=0.6e-5
+fi
 
 IS_INFERENCE="false"
 
@@ -121,13 +133,13 @@ BATCH_SIZE=$1
 
 ## Model parallelism, 1 is no MP
 ## Currently MoE models have divergence issue when MP > 1.
-MP_SIZE=2
+MP_SIZE=$2
 
 ## Pipeline parallelism
 ## Currently we don't support PP for MoE. To disable PP, set PP_SIZE
 ## to 1 and use the "--no-pipeline-parallel" arg.
 PP_SIZE=1
-NUM_GPUS=1
+NUM_GPUS=$2
 ###############################################################################
 ### MoE configs
 ## Number of experts. EP_SIZE 1 means dense model without MoE
@@ -246,10 +258,10 @@ if [ "${USE_INTERNAL_DATA}" = "true" ]; then
     0.00208 ${NIH} 0.13017 ${CC2020} 0.09446 ${PCC} 0.15652 ${CC2021} \
     0.01359 ${ARX} 0.01588 ${GIT}"
 else
-    VOCAB_PATH=/home/ubuntu/frameworks/Megatron-DeepSpeed/gpt2-vocab.json
-    MERGE_PATH=/home/ubuntu/frameworks/Megatron-DeepSpeed/gpt2-merges.txt
+    VOCAB_PATH=../../gpt2-vocab.json
+    MERGE_PATH=../../gpt2-merges.txt
     # Public the Pile dataset, can be downloaded at https://mystic.the-eye.eu/public/AI/pile_neox/
-    DATA_BLEND=/home/ubuntu/frameworks/Megatron-DeepSpeed/dataset/BookCorpusDataset/BookCorpusDataset_text_document
+    DATA_BLEND=../../BookCorpusDataset_text_document
     # DATA_BLEND=/home/ubuntu/frameworks/Megatron-DeepSpeed/dataset/UbuntuIRCDataset_text_document
 fi
 ###############################################################################
